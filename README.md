@@ -2,6 +2,13 @@
 
 > **Automated, Use-Case-Aware Assurance and Security Auditing for AI Agent Repositories.**
 
+
+Run -----$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+
+  agentcheck .
+
+
+
 AgentCheck is a command-line assessment tool built for modern AI agent codebases. It combines **deterministic static analysis** (AST inspections, hardcoded credential detection, sensitive tool audits) with **dynamic, dual-pass LLM reasoning** (primary architectural review + independent second-opinion verification).
 
 Whether you are auditing your own custom LangChain/LlamaIndex agents or verifying third-party agents, AgentCheck inspects prompts, tool guards, authorization boundaries, credential leakage, and data privacy—and automatically generates targeted test scenarios for evaluation harnesses.
