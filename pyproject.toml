@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcheck"
+version = "0.1.0"
+description = "Use-case-aware assessment for Python agent repositories"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AgentCheck contributors" }]
+dependencies = [
+  "langchain>=1.0,<2.0",
+  "langchain-openai>=1.0,<2.0",
+  "langchain-ollama>=1.0,<2.0",
+]
+
+[project.scripts]
+agentcheck = "agentcheck.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
