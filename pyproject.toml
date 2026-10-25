@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agentcheck = "agentcheck.cli:main"
+agentcheck = "agentcheck.cli_pkg.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

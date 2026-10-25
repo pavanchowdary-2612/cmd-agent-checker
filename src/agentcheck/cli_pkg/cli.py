@@ -1,18 +1,23 @@
-"""AgentCheck command line."""
+"""AgentCheck command line interface and report rendering pipeline."""
 
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
+import sys
 from urllib.parse import urlparse
 
-from . import __version__
-from .analyzer import model_review, static_findings, verify_findings
-from .models import ScanResult
-from .runner import run_scenarios, scenario_command_is_excluded
-from .workspace import EXCLUDED_TEST_DIRS, inventory_repository
+# Updated imports: use the new sub-package locations
+from .. import __version__
+from ..analysis.analyzer import model_review, static_findings, verify_findings
+from ..core.models import ScanResult
+from ..execution.runner import run_scenarios, scenario_command_is_excluded
+from ..workspace_pkg.workspace import EXCLUDED_TEST_DIRS, inventory_repository
 
+
+# -----------------------------------------------------------------------------
+# Configuration Loading: Load Environment Variables from Project Root
+# -----------------------------------------------------------------------------
 
 def _load_agentcheck_env() -> None:
     """Load supported settings from AgentCheck's own .env file.
@@ -20,13 +25,16 @@ def _load_agentcheck_env() -> None:
     Resolve the file from this installed package's project root, never from
     the repository being scanned. Existing process variables always win.
     """
-    config_path = Path(__file__).resolve().parents[2] / ".env"
+    config_path = Path(__file__).resolve().parents[3] / ".env"
     if not config_path.is_file():
         return
+        
     try:
         lines = config_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return
+        
+    # Parse KEY=VALUE configuration lines
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -35,6 +43,7 @@ def _load_agentcheck_env() -> None:
             stripped = stripped[7:].lstrip()
         name, separator, value = stripped.partition("=")
         name = name.strip()
+        # Accept only AGENTCHECK_ prefixed variables or OLLAMA_API_KEY
         if not separator or not name or not (name.startswith("AGENTCHECK_") or name == "OLLAMA_API_KEY"):
             continue
         value = value.strip()
@@ -43,7 +52,12 @@ def _load_agentcheck_env() -> None:
         os.environ.setdefault(name, value)
 
 
+# -----------------------------------------------------------------------------
+# Terminal Report Renderer: Human-Readable Console Output
+# -----------------------------------------------------------------------------
+
 def _render(result: ScanResult) -> str:
+    """Format assessment results into a structured human-readable terminal string."""
     lines = [
         "AgentCheck assessment",
         f"Repository: {result.root}",
@@ -52,6 +66,8 @@ def _render(result: ScanResult) -> str:
         f"Model review: {result.model_used or 'not available'}",
         "",
     ]
+    
+    # Render active findings with severity, verification status, and recommendations
     if result.findings:
         lines.append(f"Findings ({len(result.findings)}):")
         for finding in result.findings:
@@ -67,12 +83,16 @@ def _render(result: ScanResult) -> str:
                 lines.append(f"    Recommendation: {finding.recommendation}")
     else:
         lines.append("No findings were returned. This is not proof the agent is safe or correct.")
+        
+    # Render findings dismissed as false positives by the independent verifier
     if result.dismissed_findings:
         lines.extend(["", f"Dismissed by second opinion ({len(result.dismissed_findings)}):"])
         for finding in result.dismissed_findings:
             location = f"{finding.path}:{finding.line}" if finding.path and finding.line else finding.path or "repository level"
             lines.append(f"  [FALSE POSITIVE] {finding.rule} — {location}")
             lines.append(f"    Reason: {finding.verification_reason or 'Verifier found insufficient evidence.'}")
+            
+    # Render planned test scenarios proposed for execution harnesses
     lines.extend(["", f"Use-case scenarios planned ({len(result.scenarios)}):"])
     for scenario in result.scenarios:
         steps = "; ".join(str(step) for step in scenario.get("steps", []))
@@ -81,12 +101,15 @@ def _render(result: ScanResult) -> str:
             lines.append(f"    Steps: {steps}")
         if scenario.get("expected"):
             lines.append(f"    Expected: {scenario['expected']}")
+            
+    # Render discovery statistics, harness files count, and adapter results
     if result.inventory:
         lines.extend(["", f"Harness/eval files discovered: {result.inventory.get('harness_file_count', 0)}"])
         opinion = result.inventory.get("second_opinion", {})
         if opinion:
             lines.append(f"LLM second opinion: {opinion.get('status', 'unknown')} ({opinion.get('checked_findings', 0)} candidates checked; {opinion.get('additional_findings', 0)} new candidates; {opinion.get('dismissed_findings', 0)} dismissed)")
         lines.append("Analysis scope: comments and fenced Markdown code examples excluded; Markdown prose and supported text/config files included.")
+        
         execution = result.inventory.get("scenario_execution")
         if execution:
             lines.extend(["", f"Scenario adapter: {execution.get('status')}"])
@@ -96,6 +119,8 @@ def _render(result: ScanResult) -> str:
                 lines.append(f"  Adapter detail: {execution['error']}")
             if execution.get("output"):
                 lines.append(f"  Adapter output: {execution['output'][-2000:]}")
+                
+    # Append scope limitations and data handling notices
     if result.notes:
         lines.extend(["", "Limitations and notes:"])
         lines.extend(f"  - {note}" for note in result.notes)
@@ -103,8 +128,12 @@ def _render(result: ScanResult) -> str:
     return "\n".join(lines)
 
 
+# -----------------------------------------------------------------------------
+# Markdown Report Renderer: Generates Permanent Document (.agentcheck/report.md)
+# -----------------------------------------------------------------------------
+
 def _render_markdown(result: ScanResult) -> str:
-    """Render a user-facing report with the inferred functionality and evidence."""
+    """Render a comprehensive GitHub-flavored Markdown report documenting the assessment."""
     lines = [
         "# AgentCheck assessment",
         "",
@@ -117,6 +146,8 @@ def _render_markdown(result: ScanResult) -> str:
         "",
         "## What this agent does",
     ]
+    
+    # Render functional agent map (purpose, workflows, tools, safeguards)
     profile = result.agent_profile
     if profile:
         if profile.get("purpose"):
@@ -134,9 +165,13 @@ def _render_markdown(result: ScanResult) -> str:
             lines.extend(["", "**Profile evidence:** " + ", ".join(f"`{path}`" for path in profile["source_paths"])])
     else:
         lines.extend(["", "The model did not return a functional map. Review the limitations below; this assessment may not be use-case-aware."])
+        
+    # Render model assessment summary
     lines.extend(["", "## Assessment summary", ""])
     summaries = [note.removeprefix("Model review summary: ") for note in result.notes if note.startswith("Model review summary:")]
     lines.extend(summaries or ["No model summary was available."])
+    
+    # Render findings table / section
     lines.extend(["", f"## Findings ({len(result.findings)})", ""])
     if result.findings:
         for finding in result.findings:
@@ -158,11 +193,15 @@ def _render_markdown(result: ScanResult) -> str:
             lines.append("")
     else:
         lines.append("No actionable findings were returned in this run. This is not proof the agent is safe or correct.")
+        
+    # Render dismissed findings
     if result.dismissed_findings:
         lines.extend(["", f"## Findings dismissed by second opinion ({len(result.dismissed_findings)})", ""])
         for finding in result.dismissed_findings:
             location = f"{finding.path}:{finding.line}" if finding.path and finding.line else finding.path or "repository level"
             lines.extend([f"- **{finding.rule}** at `{location}` — {finding.verification_reason or 'Insufficient evidence.'}"])
+            
+    # Render proposed evaluation scenarios
     lines.extend(["", f"## Use-case scenarios proposed ({len(result.scenarios)})", ""])
     for scenario in result.scenarios:
         lines.extend([f"### {scenario.get('title', scenario.get('id', 'Scenario'))}", "", f"Category: {scenario.get('category', 'scenario')}", ""])
@@ -170,6 +209,8 @@ def _render_markdown(result: ScanResult) -> str:
         if scenario.get("expected"):
             lines.extend(["", f"**Expected:** {scenario['expected']}"])
         lines.append("")
+        
+    # Append scope limitations
     lines.extend(["## Scope and limitations", ""])
     if result.notes:
         lines.extend(f"- {note}" for note in result.notes)
@@ -182,18 +223,28 @@ def _render_markdown(result: ScanResult) -> str:
     return "\n".join(lines)
 
 
+# -----------------------------------------------------------------------------
+# CLI Entrypoint & Scan Command Dispatcher
+# -----------------------------------------------------------------------------
+
 def main(argv: list[str] | None = None) -> int:
+    """Parse command line arguments, execute repository audit, and output reports."""
     _load_agentcheck_env()
+    
+    # Configure command-line parser and options
     parser = argparse.ArgumentParser(prog="agentcheck", description="Review an agent repository and test plan against its use case.")
     parser.add_argument("--version", action="version", version=f"agentcheck {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     scan = sub.add_parser("scan", help="assess an agent repository")
     scan.add_argument("repository", type=Path)
     scan.add_argument("--use-case", help="override the use case inferred from the repository")
+    
+    # Detect provider defaults (Ollama Cloud when key is present, else local Ollama)
     cloud_key_configured = bool(os.getenv("OLLAMA_API_KEY"))
     default_model = "gemma4:31b" if cloud_key_configured else "granite3.2:8b"
     default_model_url = "https://ollama.com/v1" if cloud_key_configured else "http://localhost:11434"
     default_api_key_env = "OLLAMA_API_KEY" if cloud_key_configured else "AGENTCHECK_API_KEY"
+    
     scan.add_argument("--model", default=os.getenv("AGENTCHECK_MODEL", default_model), help="Ollama or OpenAI-compatible model name")
     scan.add_argument("--model-url", default=os.getenv("AGENTCHECK_MODEL_URL", default_model_url), help="model API base URL; uses Ollama Cloud when OLLAMA_API_KEY is set, otherwise local Ollama")
     scan.add_argument("--api-key-env", default=os.getenv("AGENTCHECK_API_KEY_ENV", default_api_key_env), help="environment variable holding an API key for compatible hosted endpoints")
@@ -205,8 +256,10 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--output", type=Path, help="also save the JSON report to this path")
     scan.add_argument("--report", type=Path, default=Path(".agentcheck/report.md"), help="Markdown report path (relative paths are inside the scanned repository; default: .agentcheck/report.md)")
     scan.add_argument("--no-report", action="store_true", help="do not write the default Markdown report")
+    
     args = parser.parse_args(argv)
 
+    # Validate target directory and timeout parameters
     if not args.repository.is_dir():
         parser.error(f"repository path is not a directory: {args.repository}")
     if args.scenario_timeout <= 0 or args.model_timeout <= 0:
@@ -216,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.scenario_command and scenario_command_is_excluded(args.scenario_command):
         parser.error("scenario command points to a test directory or test runner; put a dedicated AgentCheck adapter outside excluded test directories")
 
+    # Step 1: Inventory the repository assets
     inventory = inventory_repository(args.repository)
     supplied_use_case = (args.use_case or "").strip()
     result = ScanResult(inventory.root, supplied_use_case or "Use case will be inferred from the repository", inventory.is_agent_candidate, files_scanned=len(inventory.files))
@@ -231,16 +285,20 @@ def main(argv: list[str] | None = None) -> int:
         "excluded_test_directories": sorted(EXCLUDED_TEST_DIRS),
         "analysis_scope": {"comments": "excluded", "markdown_fenced_code_examples": "excluded", "markdown_prose": "included"},
     }
+    
+    # Step 2: Run deterministic static analysis
     result.findings.extend(static_findings(inventory))
     if not inventory.is_agent_candidate:
         result.notes.append("Agent-repository detection is heuristic and did not confirm both a supported model-library import and a tool/agent definition.")
     if inventory.environment_files:
         env_paths = ", ".join(str(item["path"]) for item in inventory.environment_files)
         result.notes.append(f"Found real environment file(s): {env_paths}. Their contents were not read or sent to the model; only paths and Git tracking/ignore status were checked.")
+        
     model_scenarios_generated = False
     review_context: list[str] = []
-
     model_available = False
+    
+    # Step 3: Run Primary Model Review (Pass 1) unless --no-model is selected
     if not args.no_model:
         api_key = os.getenv(args.api_key_env)
         findings, scenarios, notes, inferred_use_case, confidence, error, profile = model_review(inventory, supplied_use_case, args.model, args.model_url, api_key, args.model_timeout)
@@ -252,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
         review_context = [*notes, "Agent functional map: " + json.dumps(profile, ensure_ascii=False)]
         result.model_used = args.model if not error else None
         model_available = not bool(error)
+        
+        # Handle use-case inference logic
         if not supplied_use_case and inferred_use_case:
             result.use_case = inferred_use_case
             result.use_case_source = "inferred_from_repository"
@@ -259,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         elif not supplied_use_case and not inferred_use_case:
             result.use_case = "Could not infer; provide --use-case"
             result.use_case_source = "inference_unavailable"
+            
         if error:
             result.notes.append(error)
             result.notes.append("Model review is the use-case reasoning engine; install/start Ollama or configure an OpenAI-compatible endpoint for scenario-driven assessment.")
@@ -271,10 +332,12 @@ def main(argv: list[str] | None = None) -> int:
             result.use_case = "Not provided; use-case inference needs model review"
             result.use_case_source = "inference_unavailable"
 
+    # Fallback placeholder scenario if none were generated
     if not result.scenarios:
         result.scenarios = [{"id": "generic-001", "title": f"Typical use-case request: {result.use_case}", "category": "happy_path", "steps": [], "expected": "Complete the request within the stated policy and use case."}]
         result.notes.append("Fallback scenario is a placeholder, not a generated or executed evaluation.")
 
+    # Step 4: Execute Scenario Adapter if configured
     if args.scenario_command and result.scenarios:
         if model_scenarios_generated:
             scenario_result = run_scenarios(inventory.root, args.scenario_command, result.scenarios, args.scenario_timeout)
@@ -282,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result.inventory["scenario_execution"] = {"status": "not_run", "reason": "No model-generated scenarios were available."}
 
+    # Step 5: Run Independent Second-Opinion Verifier (Pass 2)
     if model_available:
         initial_count = len(result.findings)
         result.findings, result.dismissed_findings, verification_error = verify_findings(
@@ -304,22 +368,33 @@ def main(argv: list[str] | None = None) -> int:
     else:
         result.inventory["second_opinion"] = {"status": "not_requested" if args.no_model else "unavailable", "checked_findings": 0, "additional_findings": 0, "dismissed_findings": 0}
 
+    # Step 6: Sort findings and render reports
     result.findings.sort(key=lambda finding: ({"critical": 0, "high": 1, "medium": 2, "low": 3}.get(finding.severity, 4), finding.path, finding.line or 0))
+    
     report_path = None
     if not args.no_report:
         report_path = args.report if args.report.is_absolute() else inventory.root / args.report
         report_path = report_path.resolve()
         result.inventory["report_path"] = str(report_path)
+        
     output = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    
+    # Save optional JSON report
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output + "\n", encoding="utf-8")
+        
+    # Save default Markdown report file
     if report_path is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(_render_markdown(result), encoding="utf-8")
+        
+    # Print output to terminal (JSON or formatted text)
     print(output if args.json else _render(result))
     if report_path is not None and not args.json:
         print(f"\nMarkdown report saved to: {report_path}")
+        
+    # Check scenario adapter status for exit code determination
     scenario_failed = False
     execution = result.inventory.get("scenario_execution")
     if execution:

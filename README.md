@@ -309,12 +309,19 @@ agentcheck scan ./my-agent `
 cmd-agent-checker/
 ├── src/
 │   └── agentcheck/
-│       ├── cli.py             # CLI commands, argument parsing, output formatting
-│       ├── analyzer.py        # Static AST analysis, secret detection, verification pipeline
-│       ├── review_agent.py    # LangChain primary review & second-opinion agent prompts
-│       ├── runner.py          # Scenario adapter execution engine
-│       ├── workspace.py       # Repository inventory, file pruning, and redaction
-│       └── models.py          # Pydantic data schemas
+│       ├── __init__.py        # Package initialization
+│       ├── agents/            # LangChain primary review & second-opinion agent prompts
+│       │   └── review_agent.py
+│       ├── analysis/          # Static AST analysis, secret detection, verification pipeline
+│       │   └── analyzer.py
+│       ├── cli_pkg/           # CLI commands, argument parsing, output formatting
+│       │   └── cli.py
+│       ├── core/              # Core data models and schemas
+│       │   └── models.py
+│       ├── execution/         # Scenario adapter execution engine
+│       │   └── runner.py
+│       └── workspace_pkg/     # Repository inventory, file pruning, and redaction
+│           └── workspace.py
 ├── examples/
 │   ├── langchain_agent/       # Production-style support agent demo with tools
 │   │   ├── agent.py

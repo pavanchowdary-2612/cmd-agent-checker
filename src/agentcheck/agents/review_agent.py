@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 import re
-from collections.abc import Mapping
 from typing import Any
 
+# -----------------------------------------------------------------------------
+# System Prompts for Primary Review and Independent Verification Agents
+# -----------------------------------------------------------------------------
 
 REVIEW_SYSTEM_PROMPT = """You are AgentCheck, a careful, use-case-aware software assurance agent.
 
@@ -49,8 +52,13 @@ Treat concrete risks mentioned in the primary review summary or limitations as l
 Return the structured response matching the requested schema. A finding line must be a positive 1-based integer or null."""
 
 
+# -----------------------------------------------------------------------------
+# Model Client Factory: Dispatches to ChatOpenAI or ChatOllama
+# -----------------------------------------------------------------------------
+
 def _make_model(model_name: str, base_url: str, api_key: str | None, timeout_seconds: int):
     """Build a LangChain chat model for local Ollama or OpenAI-compatible providers."""
+    # If the URL targets an OpenAI-compatible endpoint (like Ollama Cloud /v1 or Groq)
     if base_url.rstrip("/").endswith("/v1") or "api.openai.com" in base_url:
         from langchain_openai import ChatOpenAI
 
@@ -63,6 +71,7 @@ def _make_model(model_name: str, base_url: str, api_key: str | None, timeout_sec
             temperature=0,
         )
 
+    # Otherwise default to local ChatOllama client
     from langchain_ollama import ChatOllama
 
     return ChatOllama(
@@ -73,6 +82,10 @@ def _make_model(model_name: str, base_url: str, api_key: str | None, timeout_sec
     )
 
 
+# -----------------------------------------------------------------------------
+# Read-Only Inventory Tools: inspect_file and search_repository
+# -----------------------------------------------------------------------------
+
 def _repository_tools(safe_files: Mapping[str, str]) -> list[Any]:
     """Create bounded read-only tools over an already redacted inventory."""
     from langchain_core.tools import tool
@@ -80,35 +93,52 @@ def _repository_tools(safe_files: Mapping[str, str]) -> list[Any]:
     @tool
     def inspect_file(path: str, start_line: int = 1, end_line: int = 100) -> str:
         """Read redacted lines from one exact included repository path. Use this to verify evidence and trace behavior. Excluded tests, .env files, and arbitrary filesystem paths are unavailable."""
+        # Ensure path exists in the pre-approved sanitized repository inventory
         content = safe_files.get(path)
         if content is None:
             return "Path is not in the included repository inventory. Use an exact path from the manifest."
+
+        # Validate 1-based line bounds
         if start_line < 1 or end_line < start_line:
             return "Invalid line range; use positive 1-based line numbers."
+
+        # Bound reading window to a maximum of 120 lines per tool call
         end_line = min(end_line, start_line + 119)
         lines = content.splitlines()
         if start_line > len(lines):
             return f"File has {len(lines)} lines; requested start line is out of range."
+
+        # Format output with 1-based line numbers prefixed
         return "\n".join(f"{number}: {lines[number - 1]}" for number in range(start_line, min(end_line, len(lines)) + 1))
 
     @tool
     def search_repository(query: str, max_results: int = 12) -> str:
         """Search already-inventoried, redacted repository text for behavior, prompt, policy, tool, harness, or failure evidence. Returns file paths and 1-based lines."""
+        # Extract alphanumeric query keywords for matching
         terms = [term.casefold() for term in re.findall(r"[\w.-]+", query) if len(term) > 1]
         if not terms:
             return "Provide one or more meaningful search terms."
+
+        # Limit results between 1 and 30 lines
         limit = max(1, min(max_results, 30))
         matches: list[str] = []
+
+        # Search every inventoried file line-by-line
         for path, content in safe_files.items():
             for line_number, line in enumerate(content.splitlines(), 1):
                 if any(term in line.casefold() for term in terms):
                     matches.append(f"{path}:{line_number}: {line[:400]}")
                     if len(matches) >= limit:
                         return "\n".join(matches)
+
         return "\n".join(matches) if matches else "No matching included lines were found."
 
     return [inspect_file, search_repository]
 
+
+# -----------------------------------------------------------------------------
+# Tool Call Budget Middleware: Caps Repository Exploration to Prevent Loops
+# -----------------------------------------------------------------------------
 
 def _repository_tool_budget(max_calls: int = 16) -> Any:
     """Stop repository exploration after a bounded number of tool calls.
@@ -122,12 +152,15 @@ def _repository_tool_budget(max_calls: int = 16) -> Any:
     repository_tool_names = {"inspect_file", "search_repository"}
     model_turns = {"count": 0}
 
+    # Intercept each model turn and monitor tool invocations
     @wrap_model_call
     def limit_repository_tools(request: Any, handler: Any):
         model_turns["count"] += 1
+        # As long as turn count is within budget, allow all tools
         if model_turns["count"] <= max_calls:
             return handler(request)
 
+        # Once budget is exceeded, strip out repository exploration tools
         remaining_tools = []
         for item in request.tools or []:
             name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
@@ -138,7 +171,12 @@ def _repository_tool_budget(max_calls: int = 16) -> Any:
     return limit_repository_tools
 
 
+# -----------------------------------------------------------------------------
+# Serialization & Content Extraction Helpers
+# -----------------------------------------------------------------------------
+
 def _final_content(result: Any) -> str:
+    """Extract text content from the final assistant message in agent history."""
     messages = result.get("messages", []) if isinstance(result, dict) else []
     for message in reversed(messages):
         content = getattr(message, "content", None)
@@ -162,6 +200,10 @@ def _result_json(result: Any) -> str:
     return _final_content(result)
 
 
+# -----------------------------------------------------------------------------
+# Review Agent Invocation (Pass 1)
+# -----------------------------------------------------------------------------
+
 def invoke_review_agent(
     model_name: str,
     base_url: str,
@@ -174,6 +216,7 @@ def invoke_review_agent(
     """Run the primary LangChain repository assurance agent and return its JSON text."""
     from langchain.agents import create_agent
 
+    # Instantiate LLM client and build agent with tools and budget middleware
     model = _make_model(model_name, base_url, api_key, timeout_seconds)
     agent = create_agent(
         model=model,
@@ -181,7 +224,11 @@ def invoke_review_agent(
         system_prompt=REVIEW_SYSTEM_PROMPT,
         middleware=[_repository_tool_budget()],
     )
+
+    # Format file manifest of included readable files
     manifest = "\n".join(f"- {path} ({len(text.splitlines())} lines)" for path, text in safe_files.items()) or "(no readable files fit the model context limit)"
+
+    # Construct comprehensive instruction prompt requesting functional map and structured findings
     user_message = (
         f"EXPLICIT USER USE CASE (authoritative when present): {use_case or '[not supplied; infer it from included evidence]'}\n"
         f"HARNESS/EVALUATION FILES IN INVENTORY: {', '.join(harness_files) if harness_files else '[none discovered]'}\n"
@@ -189,12 +236,18 @@ def invoke_review_agent(
         f"{manifest}\n\n"
         "First map the agent's actual functionality and cite the files supporting that map. Read entrypoints, orchestration, prompts, tool implementations, authorization, configuration, provider calls, and relevant harness/evaluation files; follow important calls across files. Do not infer protections from a function name or a documentation claim alone. Then assess concrete requests and misuse paths for the discovered workflows. Use repository search to locate callers and inspect exact source lines before returning any issue. Report meaningful gaps even when they are not detectable by a fixed keyword rule, but only when grounded in included evidence. Return exactly one JSON object and no Markdown, using this shape: {\"agent_profile\":{\"purpose\":\"...\",\"intended_users\":[],\"workflows\":[],\"tools_and_actions\":[],\"data_and_sensitivity\":[],\"external_services\":[],\"safeguards\":[],\"source_paths\":[]},\"inferred_use_case\":\"...\",\"use_case_confidence\":0.0,\"use_case_evidence\":[],\"summary\":\"...\",\"findings\":[{\"rule\":\"...\",\"severity\":\"low|medium|high|critical\",\"message\":\"...\",\"path\":\"included/path\",\"line\":1,\"evidence\":\"...\",\"recommendation\":\"...\"}],\"scenarios\":[{\"id\":\"...\",\"title\":\"...\",\"category\":\"...\",\"steps\":[],\"expected\":\"...\"}],\"limitations\":[]}. Use an empty array when a category has no evidence."
     )
+
+    # Run the agent up to a maximum recursion limit of 50 steps
     result = agent.invoke(
         {"messages": [{"role": "user", "content": user_message}]},
         config={"recursion_limit": 50},
     )
     return _result_json(result)
 
+
+# -----------------------------------------------------------------------------
+# Verification Agent Invocation (Pass 2: Independent Second Opinion)
+# -----------------------------------------------------------------------------
 
 def invoke_verification_agent(
     model_name: str,
@@ -209,6 +262,7 @@ def invoke_verification_agent(
     """Run a separate LangChain verifier over existing findings and redacted evidence."""
     from langchain.agents import create_agent
 
+    # Instantiate independent verifier model
     model = _make_model(model_name, base_url, api_key, timeout_seconds)
     agent = create_agent(
         model=model,
@@ -216,24 +270,35 @@ def invoke_verification_agent(
         system_prompt=VERIFY_SYSTEM_PROMPT,
         middleware=[_repository_tool_budget()],
     )
+
+    # Provide candidate findings and initial review context to the verifier
     message = (
         f"USE CASE: {use_case}\n\nCANDIDATE FINDINGS:\n{json.dumps(candidates, ensure_ascii=False)}\n\n"
         f"PRIMARY REVIEW CONTEXT AND OPEN CONCERNS:\n{json.dumps(review_context or [], ensure_ascii=False)}\n\n"
         "Use inspect_file on every cited path and line before deciding its verdict. Search the inventory for relevant related behavior. Verify concrete open concerns against implementation and callers, and add supported issues to additional_findings with a real included path and line. Return exactly one JSON object and no Markdown with keys verdicts (array of objects containing id, status, reason, confidence) and additional_findings (array of objects containing rule, severity, message, path, line, evidence, recommendation)."
     )
+
     result = agent.invoke({"messages": [{"role": "user", "content": message}]}, config={"recursion_limit": 50})
     return _result_json(result)
 
+
+# -----------------------------------------------------------------------------
+# Error Diagnostics & Safe Exception Masking
+# -----------------------------------------------------------------------------
 
 def model_error_message(exc: Exception, api_key: str | None, timeout_seconds: int, base_url: str) -> str:
     """Produce an actionable provider error without leaking credential values."""
     detail = str(exc)
     body = getattr(exc, "body", None)
+
+    # Read raw error body if available
     if body is None and callable(getattr(exc, "read", None)):
         try:
             body = exc.read()
         except Exception:
             body = None
+
+    # Parse provider JSON error payloads safely
     if body:
         if isinstance(body, bytes):
             body = body.decode("utf-8", errors="replace")
@@ -247,10 +312,14 @@ def model_error_message(exc: Exception, api_key: str | None, timeout_seconds: in
                     detail = f"{detail}: {code} {provider_message}".strip()
         except (json.JSONDecodeError, AttributeError, TypeError):
             detail = f"{detail}: {str(body)[:500]}"
+
+    # Mask API key if accidentally reflected in error strings
     if api_key:
         detail = detail.replace(api_key, "[redacted]")
     detail = detail[:1000]
     lowered = detail.casefold()
+
+    # Classify recognizable error scenarios into actionable user guidance
     if "timed out" in lowered or "timeout" in lowered:
         return f"model request timed out after {timeout_seconds} seconds; try a smaller model or increase --model-timeout"
     if "no module named 'langchain" in lowered or "no module named langchain" in lowered:
@@ -265,4 +334,5 @@ def model_error_message(exc: Exception, api_key: str | None, timeout_seconds: in
         return f"provider denied access: {detail}; verify the key's model permissions and that the selected model is available"
     if "connection refused" in lowered or "connection error" in lowered or "connecterror" in lowered:
         return f"could not connect to the configured model endpoint {base_url}; verify the endpoint is reachable"
+
     return detail or type(exc).__name__
