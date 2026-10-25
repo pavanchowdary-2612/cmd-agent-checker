@@ -230,6 +230,10 @@ def _render_markdown(result: ScanResult) -> str:
 def main(argv: list[str] | None = None) -> int:
     """Parse command line arguments, execute repository audit, and output reports."""
     _load_agentcheck_env()
+    command_args = list(sys.argv[1:] if argv is None else argv)
+    # Support the concise `agentcheck .` form alongside `agentcheck scan .`.
+    if command_args and command_args[0] not in {"scan", "--help", "--version"} and not command_args[0].startswith("-"):
+        command_args.insert(0, "scan")
     
     # Configure command-line parser and options
     parser = argparse.ArgumentParser(prog="agentcheck", description="Review an agent repository and test plan against its use case.")
@@ -257,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     scan.add_argument("--report", type=Path, default=Path(".agentcheck/report.md"), help="Markdown report path (relative paths are inside the scanned repository; default: .agentcheck/report.md)")
     scan.add_argument("--no-report", action="store_true", help="do not write the default Markdown report")
     
-    args = parser.parse_args(argv)
+    args = parser.parse_args(command_args)
 
     # Validate target directory and timeout parameters
     if not args.repository.is_dir():

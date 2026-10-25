@@ -2,9 +2,6 @@
 
 > **Automated, Use-Case-Aware Assurance and Security Auditing for AI Agent Repositories.**
 
-Run :---- $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-          agentcheck .
-
 AgentCheck is a command-line assessment tool built for modern AI agent codebases. It combines **deterministic static analysis** (AST inspections, hardcoded credential detection, sensitive tool audits) with **dynamic, dual-pass LLM reasoning** (primary architectural review + independent second-opinion verification).
 
 Whether you are auditing your own custom LangChain/LlamaIndex agents or verifying third-party agents, AgentCheck inspects prompts, tool guards, authorization boundaries, credential leakage, and data privacy—and automatically generates targeted test scenarios for evaluation harnesses.
@@ -26,7 +23,7 @@ Whether you are auditing your own custom LangChain/LlamaIndex agents or verifyin
   - [3. Auditing the Flawed Agent (Demo Vulnerabilities)](#3-auditing-the-flawed-agent-demo-vulnerabilities)
 - [CLI Reference](#-cli-reference)
 - [Automated Scenario Execution (Adapters)](#-automated-scenario-execution-adapters)
-- [Privacy & Security Guarantees](#-privacy--security-guarantees)
+- [Privacy & Data Handling](#-privacy--data-handling)
 - [Repository Structure](#-repository-structure)
 - [Development & Testing](#-development--testing)
 
@@ -202,11 +199,13 @@ agentcheck scan ./examples/langchain_agent `
   --use-case "Customer support agent that looks up demo orders and submits capped refunds only after explicit confirmation"
 ```
 
+From inside a repository, the shorthand `agentcheck .` scans the current directory; `agentcheck scan .` is the explicit equivalent.
+
 AgentCheck will:
 1. Inventory all non-test files.
 2. Check for exposed keys, unverified tool actions, and data leaks.
 3. Reason over system prompts and tool constraints.
-4. Plan 4+ use-case-specific test scenarios (adversarial injection, boundary limits, policy refusals).
+4. Propose use-case-specific scenarios (for example, adversarial inputs, boundary cases, and policy refusals).
 5. Run a second LLM pass to confirm all findings.
 6. Write a full Markdown report to `./examples/langchain_agent/.agentcheck/report.md`.
 
@@ -297,9 +296,9 @@ agentcheck scan ./my-agent `
 
 ---
 
-## 🔒 Privacy & Security Guarantees
+## 🔒 Privacy & Data Handling
 
-- **No Secret Leaks**: Before repository text is processed by LLMs, API keys, tokens, credit card patterns, and email addresses are automatically redacted.
+- **Best-effort redaction**: Common credential and personal-data patterns are redacted before model review. This is not guaranteed to catch every secret format; do not send private code to a hosted model unless your data-handling policy permits it.
 - **`.env` Isolation**: Real `.env` files are never opened or sent to models. AgentCheck only checks if `.env` is properly tracked or ignored in `.gitignore`.
 - **Read-Only Inspection**: Tools provided to the LLM agent (`inspect_file`, `search_repository`) have read-only access to inventoried files and cannot browse arbitrary filesystem paths.
 - **Deterministic Bounds**: Bounded turns (maximum 16 repository tool calls) ensure deterministic evaluation without runaway costs or infinite loops.

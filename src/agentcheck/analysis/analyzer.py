@@ -372,7 +372,7 @@ def model_review(
 ) -> tuple[list[Finding], list[dict[str, Any]], list[str], str | None, float | None, str | None, dict[str, Any]]:
     """Execute primary LLM review agent, parse structured findings, and build use-case scenarios."""
     safe_files, omitted = model_context_files(inventory)
-    known_paths = {item.path for item in inventory.files}
+    known_paths = {item.path: item for item in inventory.files}
     
     try:
         content = invoke_review_agent(
